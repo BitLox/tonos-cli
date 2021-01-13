@@ -8,7 +8,8 @@
 
 ## How to build
 
-    cargo build [--release]
+    cargo update
+    cargo build [--release] [-j8]
 
 ## How to test
 
@@ -215,9 +216,8 @@ all `--value` parameters must be defined in tons, like this: `--value 10.5`, it 
 
 #### 1) Ordinary stake
 
-    tonos-cli depool [--addr <depool_address>] stake ordinary [--wallet <msig_address>] --value <number> [--autoresume-off] [--sign <key_file or seed_phrase>]
+    tonos-cli depool [--addr <depool_address>] stake ordinary [--wallet <msig_address>] --value <number> [--sign <key_file or seed_phrase>]
 
-`--autoresume-off` - participant stake will not be automatically reinvested to the next round.
 
 #### 2) Vesting stake
 

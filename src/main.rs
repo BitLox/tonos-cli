@@ -10,18 +10,17 @@
  * See the License for the specific TON DEV software governing permissions and
  * limitations under the License.
  */
-#[macro_use]
-extern crate clap;
-#[macro_use]
-extern crate serde_json;
-#[macro_use]
-extern crate serde_derive;
+#[macro_use] extern crate clap;
+#[macro_use] extern crate log;
+#[macro_use] extern crate serde_json;
 
 mod account;
 mod call;
 mod config;
 mod convert;
 mod crypto;
+mod decode;
+mod debot;
 mod deploy;
 mod depool;
 mod depool_abi;
@@ -35,8 +34,10 @@ mod voting;
 use account::get_account;
 use call::{call_contract, call_contract_with_msg, generate_message, parse_params, run_get_method};
 use clap::{ArgMatches, SubCommand, Arg, AppSettings};
-use config::{Config, set_config};
+use config::{Config, set_config, clear_config};
 use crypto::{generate_mnemonic, extract_pubkey, generate_keypair};
+use debot::{create_debot_command, debot_command};
+use decode::{create_decode_command, decode_command};
 use deploy::deploy_contract;
 use depool::{create_depool_command, depool_command};
 use genaddr::generate_address;
@@ -47,7 +48,7 @@ use voting::{create_proposal, decode_proposal, vote};
 
 pub const VERBOSE_MODE: bool = true;
 const DEF_MSG_LIFETIME: u32 = 30;
-const CONFIG_BASE_NAME: &'static str = "tonlabs-cli.conf.json";
+const CONFIG_BASE_NAME: &'static str = "tonos-cli.conf.json";
 
 enum CallType {
     Run,
@@ -81,21 +82,17 @@ fn default_config_name() -> Result<String, String> {
         })
 }
 
-fn main() -> Result<(), i32> {    
-    main_internal().map_err(|err_str| {
+#[tokio::main]
+async fn main() -> Result<(), i32> {
+    main_internal().await.map_err(|err_str| {
         println!("Error: {}", err_str);
         1
     })
 }
 
-fn main_internal() -> Result <(), String> {
-    let build_info = match option_env!("BUILD_INFO") {
-        Some(s) => s,
-        None => "none",
-    };
-
+async fn main_internal() -> Result <(), String> {
     let callex_sub_command = SubCommand::with_name("callex")
-        .about("Sends external message to contract with encoded function call.")
+        .about("Sends external message to contract with encoded function call (alternative syntax).")
         .setting(AppSettings::AllowMissingPositional)
         .setting(AppSettings::AllowLeadingHyphen)  
         .setting(AppSettings::TrailingVarArg)
@@ -127,16 +124,24 @@ fn main_internal() -> Result <(), String> {
             .help("Arguments for the contract method.")
             .multiple(true));
 
-    let matches = clap_app! (tonlabs_cli =>
-        (version: &*format!("0.1 ({})", build_info))
+    let matches = clap_app! (tonos_cli =>
+        (version: &*format!("{}\nCOMMIT_ID: {}\nBUILD_DATE: {}\nCOMMIT_DATE: {}\nGIT_BRANCH: {}",
+        env!("CARGO_PKG_VERSION"),
+            env!("BUILD_GIT_COMMIT"),
+            env!("BUILD_TIME") ,
+            env!("BUILD_GIT_DATE"),
+            env!("BUILD_GIT_BRANCH")
+        ))
         (author: "TONLabs")
         (about: "TONLabs console tool for TON")
         (@arg NETWORK: -u --url +takes_value "Network to connect.")
-        (@arg CONFIG: -c --config +takes_value "Path to tonos-cli configuration file.") 
+        (@arg CONFIG: -c --config +takes_value "Path to tonos-cli configuration file.")
+        (@arg JSON: -j --json "Cli prints output in json format.")
         (@subcommand version =>
             (about: "Prints build and version info.")
         )
         (@subcommand convert =>
+            (about: "Converts tokens to nanotokens.")
             (@subcommand tokens =>
                 (about: "Converts tokens to nanotokens.")
                 (@arg AMOUNT: +required +takes_value "Token amount value")
@@ -147,7 +152,7 @@ fn main_internal() -> Result <(), String> {
             (author: "TONLabs")
         )
         (@subcommand genpubkey =>
-            (about: "Generates seed phrase.")
+            (about: "Generates public key.")
             (author: "TONLabs")
             (@arg PHRASE: +required +takes_value "Seed phrase (12 words).")
         )
@@ -161,7 +166,7 @@ fn main_internal() -> Result <(), String> {
         (@subcommand genaddr =>
             (@setting AllowNegativeNumbers)
             (about: "Calculates smart contract address in different formats. By default, input tvc file isn't modified.")
-            (version: "0.1")
+            (version: &*format!("{}", env!("CARGO_PKG_VERSION")))
             (author: "TONLabs")
             (@arg TVC: +required +takes_value "Compiled smart contract (tvc file).")
             (@arg ABI: +required +takes_value "Json file with contract ABI.")
@@ -176,10 +181,10 @@ fn main_internal() -> Result <(), String> {
             (@setting AllowNegativeNumbers)
             (@setting AllowLeadingHyphen)
             (about: "Deploy smart contract to blockchain.")
-            (version: "0.1")
+            (version: &*format!("{}", env!("CARGO_PKG_VERSION")))
             (author: "TONLabs")
             (@arg TVC: +required +takes_value "Compiled smart contract (tvc file)")
-            (@arg PARAMS: +required +takes_value "Constructor arguments.")
+            (@arg PARAMS: +required +takes_value "Constructor arguments. Can be passed via a filename.")
             (@arg ABI: --abi +takes_value "Json file with contract ABI.")
             (@arg SIGN: --sign +takes_value "Keypair used to sign 'constructor message'.")
             (@arg WC: --wc +takes_value "Workchain id of the smart contract (default 0).")
@@ -189,18 +194,18 @@ fn main_internal() -> Result <(), String> {
         (@subcommand call =>
             (@setting AllowLeadingHyphen)
             (about: "Sends external message to contract with encoded function call.")
-            (version: "0.1")
+            (version: &*format!("{}", env!("CARGO_PKG_VERSION")))
             (author: "TONLabs")
             (@arg ADDRESS: +required +takes_value "Contract address.")
             (@arg METHOD: +required +takes_value "Name of calling contract method.")
-            (@arg PARAMS: +required +takes_value "Arguments for the contract method.")
+            (@arg PARAMS: +required +takes_value "Arguments for the contract method. Can be passed via a filename.")
             (@arg ABI: --abi +takes_value "Json file with contract ABI.")
             (@arg SIGN: --sign +takes_value "Keypair used to sign message.")
             (@arg VERBOSE: -v --verbose "Prints additional information about command execution.")
         )
         (@subcommand send =>
             (about: "Sends prepared message to contract.")
-            (version: "0.1")
+            (version: &*format!("{}", env!("CARGO_PKG_VERSION")))
             (author: "TONLabs")
             (@arg MESSAGE: +required +takes_value "Message to send.")
             (@arg ABI: --abi +takes_value "Json file with contract ABI.")
@@ -212,7 +217,7 @@ fn main_internal() -> Result <(), String> {
             (author: "TONLabs")
             (@arg ADDRESS: +required +takes_value "Contract address.")
             (@arg METHOD: +required +takes_value "Name of calling contract method.")
-            (@arg PARAMS: +required +takes_value "Arguments for the contract method.")
+            (@arg PARAMS: +required +takes_value "Arguments for the contract method. Can be passed via a filename.")
             (@arg ABI: --abi +takes_value "Json file with contract ABI.")
             (@arg SIGN: --sign +takes_value "Keypair used to sign message.")
             (@arg LIFETIME: --lifetime +takes_value "Period of time in seconds while message is valid.")
@@ -225,7 +230,7 @@ fn main_internal() -> Result <(), String> {
             (about: "Runs contract function locally.")
             (@arg ADDRESS: +required +takes_value "Contract address.")
             (@arg METHOD: +required +takes_value "Name of calling contract method.")
-            (@arg PARAMS: +required +takes_value "Arguments for the contract method.")
+            (@arg PARAMS: +required +takes_value "Arguments for the contract method. Can be passed via a filename.")
             (@arg ABI: --abi +takes_value "Json file with contract ABI.")
             (@arg VERBOSE: -v --verbose "Prints additional information about command execution.")
         )
@@ -233,7 +238,7 @@ fn main_internal() -> Result <(), String> {
         (@subcommand config =>
             (@setting AllowLeadingHyphen)
             (about: "Saves certain default values for options into config file.")
-            (version: "0.1")
+            (version: &*format!("{}", env!("CARGO_PKG_VERSION")))
             (author: "TONLabs")
             (@arg URL: --url +takes_value "Url to connect.")
             (@arg ABI: --abi +takes_value conflicts_with[DATA] "File with contract ABI.")
@@ -244,18 +249,32 @@ fn main_internal() -> Result <(), String> {
             (@arg RETRIES: --retries +takes_value "Number of attempts to call smart contract function if previous attempt was unsuccessful.")
             (@arg TIMEOUT: --timeout +takes_value "Contract call timeout in ms.")
             (@arg LIST: --list conflicts_with[URL ABI KEYS ADDR RETRIES TIMEOUT WC] "Prints all config parameters.")
+            (@arg DEPOOL_FEE: --depool_fee +takes_value "Value added to message sent to depool to cover it's fees (change will be returned).")
+            (@subcommand clear =>
+                (@setting AllowLeadingHyphen)
+                (about: "Resets certain default values for options in the config file. Resets all values if used without options.")
+                (@arg URL: --url "Url to connect.")
+                (@arg ABI: --abi "File with contract ABI.")
+                (@arg KEYS: --keys "File with keypair.")
+                (@arg ADDR: --addr "Contract address.")
+                (@arg WALLET: --wallet "Multisig wallet address. Used in commands which send internal messages through multisig wallets.")
+                (@arg WC: --wc "Workchain id.")
+                (@arg RETRIES: --retries "Number of attempts to call smart contract function if previous attempt was unsuccessful.")
+                (@arg TIMEOUT: --timeout "Contract call timeout in ms.")
+                (@arg DEPOOL_FEE: --depool_fee "Value added to message sent to depool to cover it's fees (change will be returned).")
+            )
         )
         (@subcommand account =>
             (@setting AllowLeadingHyphen)
             (about: "Gets account information.")
-            (version: "0.1")
+            (version: &*format!("{}", env!("CARGO_PKG_VERSION")))
             (author: "TONLabs")
             (@arg ADDRESS: +required +takes_value "Smart contract address.")
             (@arg VERBOSE: -v --verbose "Prints additional information about command execution.")
         )
         (@subcommand proposal =>
+            (about: "Submits proposal transaction in multisignature wallet with text comment.")
             (@subcommand create =>
-                (about: "Submits proposal transaction in multisignature wallet with text comment.")
                 (@arg ADDRESS: +required +takes_value "Address of multisignature wallet.")
                 (@arg DEST: +required +takes_value "Address of proposal contract.")
                 (@arg COMMENT: +required +takes_value "Proposal description (max symbols 382).")
@@ -279,6 +298,8 @@ fn main_internal() -> Result <(), String> {
         )
         (subcommand: create_multisig_command())
         (subcommand: create_depool_command())
+        (subcommand: create_decode_command())
+        (subcommand: create_debot_command())
         (@subcommand getconfig =>
             (about: "Reads global configuration parameter with defined index.")
             (@arg INDEX: +required +takes_value "Parameter index.")
@@ -295,20 +316,23 @@ fn main_internal() -> Result <(), String> {
         (@setting SubcommandRequired)
     ).get_matches();
 
+    let is_json = matches.is_present("JSON");
+
     let config_file = matches.value_of("CONFIG").map(|v| v.to_string())
         .or(env::var("TONOSCLI_CONFIG").ok())
         .unwrap_or(default_config_name()?);
 
     let mut conf = match Config::from_file(&config_file) {
         Some(c) => {
-            println!("Config: {}", config_file);
+            if !is_json { println!("Config: {}", config_file); }
             c
         },
         None => {
-            println!("Config: default");
+            if !is_json { println!("Config: default"); }
             Config::new()
         },
     };
+    conf.is_json = is_json;
 
     if let Some(url) = matches.value_of("NETWORK") {
         conf.url = url.to_string();
@@ -320,37 +344,37 @@ fn main_internal() -> Result <(), String> {
         }
     }
     if let Some(m) = matches.subcommand_matches("callex") {
-        return callex_command(m, conf);
+        return callex_command(m, conf).await;
     }
     if let Some(m) = matches.subcommand_matches("call") {
-        return call_command(m, conf, CallType::Call);
+        return call_command(m, conf, CallType::Call).await;
     }
     if let Some(m) = matches.subcommand_matches("run") {
-        return call_command(m, conf, CallType::Run);
+        return call_command(m, conf, CallType::Run).await;
     }
     if let Some(m) = matches.subcommand_matches("runget") {
-        return runget_command(m, conf);
+        return runget_command(m, conf).await;
     }
     if let Some(m) = matches.subcommand_matches("message") {
-        return call_command(m, conf, CallType::Msg);
+        return call_command(m, conf, CallType::Msg).await;
     }
     if let Some(m) = matches.subcommand_matches("send") {
-        return send_command(m, conf);
+        return send_command(m, conf).await;
     }
     if let Some(m) = matches.subcommand_matches("deploy") {        
-        return deploy_command(m, conf);
+        return deploy_command(m, conf).await;
     } 
     if let Some(m) = matches.subcommand_matches("config") {
-        return config_command(m, conf);
+        return config_command(m, conf, config_file);
     }
     if let Some(m) = matches.subcommand_matches("genaddr") {
-        return genaddr_command(m, conf);
+        return genaddr_command(m, conf).await;
     }
     if let Some(m) = matches.subcommand_matches("getkeypair") {
         return getkeypair_command(m, conf);
     }
     if let Some(m) = matches.subcommand_matches("account") {
-        return account_command(m, conf);
+        return account_command(m, conf).await;
     }
     if let Some(m) = matches.subcommand_matches("genphrase") {
         return genphrase_command(m, conf);
@@ -360,33 +384,39 @@ fn main_internal() -> Result <(), String> {
     }
     if let Some(m) = matches.subcommand_matches("proposal") {
         if let Some(m) = m.subcommand_matches("create") {
-            return proposal_create_command(m, conf);
+            return proposal_create_command(m, conf).await;
         }
         if let Some(m) = m.subcommand_matches("vote") {
-            return proposal_vote_command(m, conf);
+            return proposal_vote_command(m, conf).await;
         }
         if let Some(m) = m.subcommand_matches("decode") {
-            return proposal_decode_command(m, conf);
+            return proposal_decode_command(m, conf).await;
         }
     }
     if let Some(m) = matches.subcommand_matches("multisig") {
-        return multisig_command(m, conf);
+        return multisig_command(m, conf).await;
     }
     if let Some(m) = matches.subcommand_matches("depool") {
-        return depool_command(m, conf);
+        return depool_command(m, conf).await;
     }
     if let Some(m) = matches.subcommand_matches("getconfig") {
-        return getconfig_command(m, conf);
+        return getconfig_command(m, conf).await;
     }
     if let Some(m) = matches.subcommand_matches("nodeid") {
         return nodeid_command(m);
     }
     if let Some(m) = matches.subcommand_matches("sendfile") {
-        return sendfile_command(m, conf);
+        return sendfile_command(m, conf).await;
+    }
+    if let Some(m) = matches.subcommand_matches("decode") {
+        return decode_command(m, conf);
+    }
+    if let Some(m) = matches.subcommand_matches("debot") {
+        return debot_command(m, conf).await;
     }
     if let Some(_) = matches.subcommand_matches("version") {
         println!(
-            "tonlabs-cli {}\nCOMMIT_ID: {}\nBUILD_DATE: {}\nCOMMIT_DATE: {}\nGIT_BRANCH: {}",
+            "tonos-cli {}\nCOMMIT_ID: {}\nBUILD_DATE: {}\nCOMMIT_DATE: {}\nGIT_BRANCH: {}",
             env!("CARGO_PKG_VERSION"),
             env!("BUILD_GIT_COMMIT"),
             env!("BUILD_TIME") ,
@@ -421,7 +451,7 @@ fn getkeypair_command(matches: &ArgMatches, _config: Config) -> Result<(), Strin
     generate_keypair(key_file.unwrap(), phrase.unwrap())
 }
 
-fn send_command(matches: &ArgMatches, config: Config) -> Result<(), String> {
+async fn send_command(matches: &ArgMatches<'_>, config: Config) -> Result<(), String> {
     let message = matches.value_of("MESSAGE");
     let abi = Some(
         matches.value_of("ABI")
@@ -435,10 +465,19 @@ fn send_command(matches: &ArgMatches, config: Config) -> Result<(), String> {
     let abi = std::fs::read_to_string(abi.unwrap())
         .map_err(|e| format!("failed to read ABI file: {}", e.to_string()))?;
 
-    call_contract_with_msg(config, message.unwrap().to_owned(), abi)
+    call_contract_with_msg(config, message.unwrap().to_owned(), abi).await
 }
 
-fn call_command(matches: &ArgMatches, config: Config, call: CallType) -> Result<(), String> {
+fn load_params(params: &str) -> Result<String, String> {
+    Ok(if params.find('{').is_none() {
+        std::fs::read_to_string(params)
+            .map_err(|e| format!("failed to load params from file: {}", e))?
+    } else {
+        params.to_string()
+    })
+}
+
+async fn call_command(matches: &ArgMatches<'_>, config: Config, call: CallType) -> Result<(), String> {
     let address = matches.value_of("ADDRESS");
     let method = matches.value_of("METHOD");
     let params = matches.value_of("PARAMS");
@@ -464,6 +503,7 @@ fn call_command(matches: &ArgMatches, config: Config, call: CallType) -> Result<
         }
     };
 
+    let params = Some(load_params(params.unwrap())?);
     print_args!(matches, address, method, params, abi, keys, lifetime, output);
 
     let abi = std::fs::read_to_string(abi.unwrap())
@@ -477,10 +517,10 @@ fn call_command(matches: &ArgMatches, config: Config, call: CallType) -> Result<
                 address.unwrap(),
                 abi,
                 method.unwrap(),
-                params.unwrap(),
+                &params.unwrap(),
                 keys,
                 local
-            )
+            ).await
         },
         CallType::Msg => {
             let lifetime = lifetime.map(|val| {
@@ -495,17 +535,17 @@ fn call_command(matches: &ArgMatches, config: Config, call: CallType) -> Result<
                 address.unwrap(),
                 abi,
                 method.unwrap(),
-                params.unwrap(),
+                &params.unwrap(),
                 keys,
                 lifetime,
                 raw,
                 output,
-            )
+            ).await
         },
     }
 }
 
-fn callex_command(matches: &ArgMatches, config: Config) -> Result<(), String> {
+async fn callex_command(matches: &ArgMatches<'_>, config: Config) -> Result<(), String> {
     let method = matches.value_of("METHOD");
     let address = Some(
         matches.value_of("ADDRESS")
@@ -537,10 +577,10 @@ fn callex_command(matches: &ArgMatches, config: Config) -> Result<(), String> {
         &params.unwrap(),
         keys,
         false,
-    )
+    ).await
 }
 
-fn runget_command(matches: &ArgMatches, config: Config) -> Result<(), String> {
+async fn runget_command(matches: &ArgMatches<'_>, config: Config) -> Result<(), String> {
     let address = matches.value_of("ADDRESS");
     let method = matches.value_of("METHOD");
     let params = matches.values_of("PARAMS");
@@ -548,10 +588,10 @@ fn runget_command(matches: &ArgMatches, config: Config) -> Result<(), String> {
         json!(values.collect::<Vec<_>>()).to_string()
     });
     print_args!(matches, address, method, params);
-    run_get_method(config, address.unwrap(), method.unwrap(), params)
+    run_get_method(config, address.unwrap(), method.unwrap(), params).await
 }
 
-fn deploy_command(matches: &ArgMatches, config: Config) -> Result<(), String> {
+async fn deploy_command(matches: &ArgMatches<'_>, config: Config) -> Result<(), String> {
     let tvc = matches.value_of("TVC");
     let params = matches.value_of("PARAMS");
     let wc = matches.value_of("WC");
@@ -567,38 +607,60 @@ fn deploy_command(matches: &ArgMatches, config: Config) -> Result<(), String> {
             .or(config.keys_path.clone())
             .ok_or("keypair file not defined. Supply it in config file or command line.".to_string())?
     );
+    let params = Some(load_params(params.unwrap())?);
     print_args!(matches, tvc, params, abi, keys, wc);
 
     let wc = wc.map(|v| i32::from_str_radix(v, 10))
         .transpose()
         .map_err(|e| format!("failed to parse workchain id: {}", e))?
         .unwrap_or(config.wc);
-    deploy_contract(config, tvc.unwrap(), &abi.unwrap(), params.unwrap(), &keys.unwrap(), wc)
+    deploy_contract(config, tvc.unwrap(), &abi.unwrap(), &params.unwrap(), &keys.unwrap(), wc).await
 }
 
-fn config_command(matches: &ArgMatches, config: Config) -> Result<(), String> {    
-    if matches.is_present("LIST") {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&config)
-                .map_err(|e| format!("failed to print config parameters: {}", e))?
-        );
-        Ok(())
-    } else {
-        let url = matches.value_of("URL");
-        let address = matches.value_of("ADDR");
-        let wallet = matches.value_of("WALLET");
-        let keys = matches.value_of("KEYS");
-        let abi = matches.value_of("ABI");
-        let wc = matches.value_of("WC");
-        let retries = matches.value_of("RETRIES");
-        let timeout = matches.value_of("TIMEOUT");
-        print_args!(matches, url, address, wallet, keys, abi, wc, retries, timeout);
-        set_config(config, "tonlabs-cli.conf.json", url, address, wallet, abi, keys, wc, retries, timeout)
+fn config_command(matches: &ArgMatches, config: Config, config_file: String) -> Result<(), String> {
+    let mut result = Ok(());
+    if !matches.is_present("LIST") {
+        if let Some(clear_matches) = matches.subcommand_matches("clear") {
+            let url = clear_matches.is_present("URL");
+            let address = clear_matches.is_present("ADDR");
+            let wallet = clear_matches.is_present("WALLET");
+            let keys = clear_matches.is_present("KEYS");
+            let abi = clear_matches.is_present("ABI");
+            let wc = clear_matches.is_present("WC");
+            let retries = clear_matches.is_present("RETRIES");
+            let timeout = clear_matches.is_present("TIMEOUT");
+            let depool_fee = clear_matches.is_present("DEPOOL_FEE");
+            result = clear_config(config, config_file.as_str(), url, address, wallet, abi, keys, wc, retries, timeout, depool_fee);
+        } else {
+            let url = matches.value_of("URL");
+            let address = matches.value_of("ADDR");
+            let wallet = matches.value_of("WALLET");
+            let keys = matches.value_of("KEYS");
+            let abi = matches.value_of("ABI");
+            let wc = matches.value_of("WC");
+            let retries = matches.value_of("RETRIES");
+            let timeout = matches.value_of("TIMEOUT");
+            let depool_fee = matches.value_of("DEPOOL_FEE");
+            result = set_config(config, config_file.as_str(), url, address, wallet, abi, keys, wc, retries, timeout, depool_fee);
+        }
     }
+    let config = match Config::from_file(config_file.as_str()) {
+        Some(c) => {
+            c
+        },
+        None => {
+            Config::new()
+        },
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&config)
+            .map_err(|e| format!("failed to print config parameters: {}", e))?
+    );
+    result
 }
 
-fn genaddr_command(matches: &ArgMatches, config: Config) -> Result<(), String> {
+async fn genaddr_command(matches: &ArgMatches<'_>, config: Config) -> Result<(), String> {
     let tvc = matches.value_of("TVC");
     let wc = matches.value_of("WC");
     let keys = matches.value_of("GENKEY").or(matches.value_of("SETKEY"));
@@ -608,16 +670,16 @@ fn genaddr_command(matches: &ArgMatches, config: Config) -> Result<(), String> {
     let abi = matches.value_of("ABI");
     let is_update_tvc = if update_tvc { Some("true") } else { None };
     print_args!(matches, tvc, wc, keys, init_data, is_update_tvc);
-    generate_address(config, tvc.unwrap(), abi.unwrap(), wc, keys, new_keys, init_data, update_tvc)
+    generate_address(config, tvc.unwrap(), abi.unwrap(), wc, keys, new_keys, init_data, update_tvc).await
 }
 
-fn account_command(matches: &ArgMatches, config: Config) -> Result<(), String> {
+async fn account_command(matches: &ArgMatches<'_>, config: Config) -> Result<(), String> {
     let address = matches.value_of("ADDRESS");
     print_args!(matches, address);
-    get_account(config, address.unwrap())
+    get_account(config, address.unwrap()).await
 }
 
-fn proposal_create_command(matches: &ArgMatches, config: Config) -> Result<(), String> {
+async fn proposal_create_command(matches: &ArgMatches<'_>, config: Config) -> Result<(), String> {
     let address = matches.value_of("ADDRESS");
     let dest = matches.value_of("DEST");
     let keys = matches.value_of("KEYS");
@@ -633,10 +695,18 @@ fn proposal_create_command(matches: &ArgMatches, config: Config) -> Result<(), S
     .transpose()?
     .unwrap_or(config.timeout);
 
-    create_proposal(config, address.unwrap(), keys, dest.unwrap(), comment.unwrap(), lifetime, offline)
+    create_proposal(
+        config,
+        address.unwrap(),
+        keys,
+        dest.unwrap(),
+        comment.unwrap(),
+        lifetime,
+        offline
+    ).await
 }
 
-fn proposal_vote_command(matches: &ArgMatches, config: Config) -> Result<(), String> {
+async fn proposal_vote_command(matches: &ArgMatches<'_>, config: Config) -> Result<(), String> {
     let address = matches.value_of("ADDRESS");
     let keys = matches.value_of("KEYS");
     let id = matches.value_of("ID");
@@ -651,20 +721,20 @@ fn proposal_vote_command(matches: &ArgMatches, config: Config) -> Result<(), Str
     .transpose()?
     .unwrap_or(config.timeout);
 
-    vote(config, address.unwrap(), keys, id.unwrap(), lifetime, offline)
+    vote(config, address.unwrap(), keys, id.unwrap(), lifetime, offline).await
 }
 
-fn proposal_decode_command(matches: &ArgMatches, config: Config) -> Result<(), String> {
+async fn proposal_decode_command(matches: &ArgMatches<'_>, config: Config) -> Result<(), String> {
     let address = matches.value_of("ADDRESS");
     let id = matches.value_of("ID");
     print_args!(matches, address, id);
-    decode_proposal(config, address.unwrap(), id.unwrap())
+    decode_proposal(config, address.unwrap(), id.unwrap()).await
 }
 
-fn getconfig_command(matches: &ArgMatches, config: Config) -> Result<(), String> {
+async fn getconfig_command(matches: &ArgMatches<'_>, config: Config) -> Result<(), String> {
     let index = matches.value_of("INDEX");
     print_args!(matches, index);
-    query_global_config(config, index.unwrap())
+    query_global_config(config, index.unwrap()).await
 }
 
 fn nodeid_command(matches: &ArgMatches) -> Result<(), String> {
@@ -677,7 +747,7 @@ fn nodeid_command(matches: &ArgMatches) -> Result<(), String> {
         convert::nodeid_from_pubkey(&vec)?
     } else if let Some(pair) = keypair {
         let pair = crypto::load_keypair(pair)?;
-        convert::nodeid_from_pubkey(&pair.public.0)?
+        convert::nodeid_from_pubkey(&hex::decode(&pair.public).unwrap())?
     } else {
         return Err("Either public key or key pair parameter should be provided".to_owned());
     };
@@ -685,8 +755,8 @@ fn nodeid_command(matches: &ArgMatches) -> Result<(), String> {
     Ok(())
 }
 
-fn sendfile_command(m: &ArgMatches, conf: Config) -> Result<(), String> {
+async fn sendfile_command(m: &ArgMatches<'_>, conf: Config) -> Result<(), String> {
     let boc = m.value_of("BOC");
     print_args!(m, boc);
-    sendfile::sendfile(conf, boc.unwrap())
+    sendfile::sendfile(conf, boc.unwrap()).await
 }

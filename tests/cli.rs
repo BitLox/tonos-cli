@@ -1,15 +1,22 @@
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
 use std::process::Command;
+use lazy_static::*;
+use std::env;
 
 const BIN_NAME: &str = "tonos-cli";
+
+lazy_static! {
+    static ref NETWORK: String = env::var("TON_NETWORK_ADDRESS")
+        .unwrap_or("http://127.0.0.1".to_string());
+}
 
 #[test]
 fn test_config() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::cargo_bin(BIN_NAME)?;
     cmd.arg("config")
         .arg("--url")
-        .arg("http://127.0.0.1")
+        .arg(&*NETWORK)
         .arg("--retries")
         .arg("10")
         .arg("--timeout")
@@ -25,7 +32,7 @@ fn test_config() -> Result<(), Box<dyn std::error::Error>> {
         .arg("--list");
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains(r#""url": "http://127.0.0.1""#))
+        .stdout(predicate::str::contains(format!(r#""url": "{}""#, &*NETWORK)))
         .stdout(predicate::str::contains(r#""retries": 10"#))
         .stdout(predicate::str::contains(r#""timeout": 25000"#))
         .stdout(predicate::str::contains(r#""wc": -2"#));
@@ -45,7 +52,7 @@ fn test_call_giver() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::cargo_bin(BIN_NAME)?;
     cmd.arg("config")
         .arg("--url")
-        .arg("http://127.0.0.1")
+        .arg(&*NETWORK)
         .assert()
         .success();
     let mut cmd = Command::cargo_bin(BIN_NAME)?;
@@ -172,7 +179,7 @@ fn test_deploy() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::cargo_bin(BIN_NAME)?;
     cmd.arg("config")
         .arg("--url")
-        .arg("http://127.0.0.1")
+        .arg(&*NETWORK)
         .assert()
         .success();
 
@@ -204,13 +211,405 @@ fn test_deploy() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn test_depool() -> Result<(), Box<dyn std::error::Error>> {
+    let giver_abi_name = "tests/samples/giver.abi.json";
+    let giver_addr = "0:841288ed3b55d9cdafa806807f02a0ae0c169aa5edfe88a789a6482429756a94";
+    let depool_abi = "tests/samples/fakeDepool.abi.json";
+    let depool_tvc = "tests/samples/fakeDepool.tvc";
+    let depool_addr = "0:2e66e882d24b087cadbc075d6cea394241c50b7111dab080b1677d304cef1b8e";
+    let msig_abi = "ton-labs-contracts/solidity/safemultisig/SafeMultisigWallet.abi.json";
+    let msig_tvc = "ton-labs-contracts/solidity/safemultisig/SafeMultisigWallet.tvc";
+    let msig_addr = "0:507fc74745d5a259b9939dfbdfd97cd186d13e8a7160206f3054746c1f0518cd";
+    let seed_phrase = "blanket time net universe ketchup maid way poem scatter blur limit drill";
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("config")
+        .arg("--url")
+        .arg(&*NETWORK)
+        .assert()
+        .success();
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("call")
+        .arg("--abi")
+        .arg(giver_abi_name)
+        .arg(giver_addr)
+        .arg("sendGrams")
+        // use precalculated depool address
+        .arg(r#"{"dest":"0:2e66e882d24b087cadbc075d6cea394241c50b7111dab080b1677d304cef1b8e","amount":10000000000}"#);
+    cmd.assert()
+        .success();
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("deploy")
+        .arg(depool_tvc)
+        .arg("{}")
+        .arg("--abi")
+        .arg(depool_abi)
+        .arg("--sign")
+        .arg(seed_phrase);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(depool_addr))
+        .stdout(predicate::str::contains("Transaction succeeded."));
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("call")
+        .arg("--abi")
+        .arg(giver_abi_name)
+        .arg(giver_addr)
+        .arg("sendGrams")
+        // use precalculated msig address
+        .arg(r#"{"dest":"0:507fc74745d5a259b9939dfbdfd97cd186d13e8a7160206f3054746c1f0518cd","amount":30000000000}"#);
+    cmd.assert()
+        .success();
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("deploy")
+        .arg(msig_tvc)
+        .arg(r#"{"owners":["0xc8bd66f90d61f7e1e1a6151a0dbe9d8640666920d8c0cf399cbfb72e089d2e41"],"reqConfirms":1}"#)
+        .arg("--abi")
+        .arg(msig_abi)
+        .arg("--sign")
+        .arg(seed_phrase);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(msig_addr))
+        .stdout(predicate::str::contains("Transaction succeeded."));
+
+    Ok(())
+}
+
+#[test]
+fn test_depool_1() -> Result<(), Box<dyn std::error::Error>> {
+    let depool_abi = "tests/samples/fakeDepool.abi.json";
+    let depool_addr = "0:2e66e882d24b087cadbc075d6cea394241c50b7111dab080b1677d304cef1b8e";
+    let msig_addr = "0:507fc74745d5a259b9939dfbdfd97cd186d13e8a7160206f3054746c1f0518cd";
+    let seed_phrase = "blanket time net universe ketchup maid way poem scatter blur limit drill";
+    
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("config")
+        .arg("--wallet")
+        .arg(msig_addr)
+        .arg("--addr")
+        .arg(depool_addr)
+        .assert()
+        .success();
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("depool")
+        .arg("replenish")
+        .arg("--value")
+        .arg("2")
+        .arg("--sign")
+        .arg(seed_phrase);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"transId": "0"#));
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("run")
+        .arg("--abi")
+        .arg(depool_abi)
+        .arg(depool_addr)
+        .arg("getData")
+        .arg("{}");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"value": "2000000000"#));
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("depool")
+        .arg("ticktock")
+        .arg("--sign")
+        .arg(seed_phrase);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"transId": "0"#));
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("run")
+        .arg("--abi")
+        .arg(depool_abi)
+        .arg(depool_addr)
+        .arg("getData")
+        .arg("{}");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"value": "1000000000"#));
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("depool")
+        .arg("events");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"StakeSigningRequested"#))
+        .stdout(predicate::str::contains(r#"{"electionId":"1","proxy":"0:0000000000000000000000000000000000000000000000000000000000000002"}"#));
+
+    Ok(())
+}
+
+#[test]
+fn test_depool_2() -> Result<(), Box<dyn std::error::Error>> {
+    let depool_abi = "tests/samples/fakeDepool.abi.json";
+    let depool_addr = "0:2e66e882d24b087cadbc075d6cea394241c50b7111dab080b1677d304cef1b8e";
+    let seed_phrase = "blanket time net universe ketchup maid way poem scatter blur limit drill";
+    
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("config")
+        .arg("--depool_fee")
+        .arg("0.7")
+        .assert()
+        .success();
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("depool")
+        .arg("withdraw")
+        .arg("off")
+        .arg("--sign")
+        .arg(seed_phrase);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"transId": "0"#));
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("run")
+        .arg("--abi")
+        .arg(depool_abi)
+        .arg(depool_addr)
+        .arg("getData")
+        .arg("{}");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"reinvest": true"#))
+        .stdout(predicate::str::contains(r#"value": "700000000"#));
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("config")
+        .arg("--depool_fee")
+        .arg("0.8")
+        .assert()
+        .success();
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("depool")
+        .arg("withdraw")
+        .arg("on")
+        .arg("--sign")
+        .arg(seed_phrase);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"transId": "0"#));
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("run")
+        .arg("--abi")
+        .arg(depool_abi)
+        .arg(depool_addr)
+        .arg("getData")
+        .arg("{}");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"reinvest": false"#))
+        .stdout(predicate::str::contains(r#"value": "800000000"#));
+
+    Ok(())
+}
+
+#[test]
+fn test_depool_3() -> Result<(), Box<dyn std::error::Error>> {
+    let giver_addr = "0:841288ed3b55d9cdafa806807f02a0ae0c169aa5edfe88a789a6482429756a94";
+    let depool_abi = "tests/samples/fakeDepool.abi.json";
+    let depool_addr = "0:2e66e882d24b087cadbc075d6cea394241c50b7111dab080b1677d304cef1b8e";
+    let seed_phrase = "blanket time net universe ketchup maid way poem scatter blur limit drill";
+    
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("depool")
+        .arg("stake")
+        .arg("lock")
+        .arg("--sign")
+        .arg(seed_phrase)
+        .arg("--beneficiary")
+        .arg(giver_addr)
+        .arg("--total")
+        .arg("1")
+        .arg("--withdrawal")
+        .arg("1")
+        .arg("--value")
+        .arg("2");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"transId": "0"#));
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("run")
+        .arg("--abi")
+        .arg(depool_abi)
+        .arg(depool_addr)
+        .arg("getData")
+        .arg("{}");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"sender": "0:507fc74745d5a259b9939dfbdfd97cd186d13e8a7160206f3054746c1f0518cd"#))
+        .stdout(predicate::str::contains(r#"stake": "2000000000"#))
+        .stdout(predicate::str::contains(r#"receiver": "0:841288ed3b55d9cdafa806807f02a0ae0c169aa5edfe88a789a6482429756a94"#))
+        .stdout(predicate::str::contains(r#"withdrawal": "86400"#))
+        .stdout(predicate::str::contains(r#"total": "86400"#));
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("depool")
+        .arg("stake")
+        .arg("vesting")
+        .arg("--sign")
+        .arg(seed_phrase)
+        .arg("--beneficiary")
+        .arg("0:0123456789012345012345678901234501234567890123450123456789012345")
+        .arg("--total")
+        .arg("2")
+        .arg("--withdrawal")
+        .arg("2")
+        .arg("--value")
+        .arg("4");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"transId": "0"#));
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("run")
+        .arg("--abi")
+        .arg(depool_abi)
+        .arg(depool_addr)
+        .arg("getData")
+        .arg("{}");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"sender": "0:507fc74745d5a259b9939dfbdfd97cd186d13e8a7160206f3054746c1f0518cd"#))
+        .stdout(predicate::str::contains(r#"stake": "4000000000"#))
+        .stdout(predicate::str::contains(r#"receiver": "0:0123456789012345012345678901234501234567890123450123456789012345"#))
+        .stdout(predicate::str::contains(r#"withdrawal": "172800"#))
+        .stdout(predicate::str::contains(r#"total": "172800"#));
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("depool")
+        .arg("stake")
+        .arg("transfer")
+        .arg("--sign")
+        .arg(seed_phrase)
+        .arg("--dest")
+        .arg(giver_addr)
+        .arg("--value")
+        .arg("2");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"transId": "0"#));
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("run")
+        .arg("--abi")
+        .arg(depool_abi)
+        .arg(depool_addr)
+        .arg("getData")
+        .arg("{}");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"sender": "0:507fc74745d5a259b9939dfbdfd97cd186d13e8a7160206f3054746c1f0518cd"#))
+        .stdout(predicate::str::contains(r#"stake": "2000000000"#))
+        .stdout(predicate::str::contains(r#"receiver": "0:841288ed3b55d9cdafa806807f02a0ae0c169aa5edfe88a789a6482429756a94"#));
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("depool")
+        .arg("stake")
+        .arg("ordinary")
+        .arg("--sign")
+        .arg(seed_phrase)
+        .arg("--value")
+        .arg("1");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"transId": "0"#));
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("run")
+        .arg("--abi")
+        .arg(depool_abi)
+        .arg(depool_addr)
+        .arg("getData")
+        .arg("{}");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"sender": "0:507fc74745d5a259b9939dfbdfd97cd186d13e8a7160206f3054746c1f0518cd"#))
+        .stdout(predicate::str::contains(r#"stake": "1000000000"#));
+
+    Ok(())
+}
+
+#[test]
+fn test_depool_4() -> Result<(), Box<dyn std::error::Error>> {
+    let depool_abi = "tests/samples/fakeDepool.abi.json";
+    let depool_addr = "0:2e66e882d24b087cadbc075d6cea394241c50b7111dab080b1677d304cef1b8e";
+    let seed_phrase = "blanket time net universe ketchup maid way poem scatter blur limit drill";
+    
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("depool")
+        .arg("stake")
+        .arg("remove")
+        .arg("--sign")
+        .arg(seed_phrase)
+        .arg("--value")
+        .arg("3");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"transId": "0"#));
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("run")
+        .arg("--abi")
+        .arg(depool_abi)
+        .arg(depool_addr)
+        .arg("getData")
+        .arg("{}");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"sender": "0:507fc74745d5a259b9939dfbdfd97cd186d13e8a7160206f3054746c1f0518cd"#))
+        .stdout(predicate::str::contains(r#"stake": "3000000000"#))
+        .stdout(predicate::str::contains(r#"value": "800000000"#));
+    
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("depool")
+        .arg("stake")
+        .arg("withdrawPart")
+        .arg("--sign")
+        .arg(seed_phrase)
+        .arg("--value")
+        .arg("4");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"transId": "0"#));
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("run")
+        .arg("--abi")
+        .arg(depool_abi)
+        .arg(depool_addr)
+        .arg("getData")
+        .arg("{}");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(r#"sender": "0:507fc74745d5a259b9939dfbdfd97cd186d13e8a7160206f3054746c1f0518cd"#))
+        .stdout(predicate::str::contains(r#"stake": "4000000000"#))
+        .stdout(predicate::str::contains(r#"value": "800000000"#));
+    
+    Ok(())
+}
+
+#[test]
 fn test_callex() -> Result<(), Box<dyn std::error::Error>> {
     let giver_abi_name = "tests/samples/giver.abi.json";
 
     let mut cmd = Command::cargo_bin(BIN_NAME)?;
     cmd.arg("config")
         .arg("--url")
-        .arg("http://127.0.0.1")
+        .arg(&*NETWORK)
         .assert()
         .success();
 
@@ -305,13 +704,12 @@ fn test_override_config_path() -> Result<(), Box<dyn std::error::Error>> {
     // config from cmd lime
     let mut cmd = Command::cargo_bin(BIN_NAME)?;
     cmd.arg("--config")
-        .arg("./tests/conf1.json")
+        .arg("tests/conf1.json")
         .arg("account")
         .arg("0:841288ed3b55d9cdafa806807f02a0ae0c169aa5edfe88a789a6482429756a94");
     cmd.assert()
         .failure()
         .stdout(predicate::str::contains("Connecting to https://test.ton.dev"));
-
     // config from env variable
     let mut cmd = Command::cargo_bin(BIN_NAME)?;
     cmd.env("TONOSCLI_CONFIG", "./tests/conf2.json")
@@ -324,7 +722,7 @@ fn test_override_config_path() -> Result<(), Box<dyn std::error::Error>> {
     // config from cmd line has higher priority than env variable
     let mut cmd = Command::cargo_bin(BIN_NAME)?;
     cmd.arg("--config")
-        .arg("./tests/conf1.json")
+        .arg("tests/conf1.json")
         .env("TONOSCLI_CONFIG", "./tests/conf2.json")
         .arg("account")
         .arg("0:841288ed3b55d9cdafa806807f02a0ae0c169aa5edfe88a789a6482429756a94");
@@ -338,7 +736,7 @@ fn test_override_config_path() -> Result<(), Box<dyn std::error::Error>> {
         .arg("0:841288ed3b55d9cdafa806807f02a0ae0c169aa5edfe88a789a6482429756a94");
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("Connecting to http://127.0.0.1"));
+        .stdout(predicate::str::contains(format!("Connecting to {}", &*NETWORK)));
     Ok(())
 }
 
@@ -414,6 +812,128 @@ fn test_account_doesnt_exist() -> Result<(), Box<dyn std::error::Error>> {
         .failure()
         .stderr(predicate::str::contains("The following required arguments were not provided:"))
         .stderr(predicate::str::contains("<ADDRESS>"));
+
+    Ok(())
+}
+
+#[test]
+fn test_decode_msg() -> Result<(), Box<dyn std::error::Error>> {
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("--json").arg("decode")
+        .arg("msg").arg("tests/samples/wallet.boc")
+        .arg("--abi").arg("tests/samples/wallet.abi.json");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("sendTransaction"))
+        .stdout(predicate::str::contains("dest"))
+        .stdout(predicate::str::contains("value"))
+        .stdout(predicate::str::contains("bounce"));
+
+    Ok(())
+}
+
+#[test]
+fn test_decode_body() -> Result<(), Box<dyn std::error::Error>> {
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("--json").arg("decode")
+        .arg("body").arg("te6ccgEBAQEARAAAgwAAALqUCTqWL8OX7JivfJrAAzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMQAAAAAAAAAAAAAAAEeGjADA==")
+        .arg("--abi").arg("tests/samples/wallet.abi.json");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("sendTransaction"))
+        .stdout(predicate::str::contains("dest"))
+        .stdout(predicate::str::contains("value"))
+        .stdout(predicate::str::contains("bounce"));
+    Ok(())
+}
+
+#[test]
+fn test_decode_body_constructor_for_minus_workchain() -> Result<(), Box<dyn std::error::Error>> {
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("decode")
+        .arg("body").arg("te6ccgEBAgEAkwABW1ByqHsAAAF1QnI+qZ/1tsdEUQb8jxj9vr/H4WuiQwfD5ESNbO4lcz2Kca2KavABAMAQYZcjaCLLbO1phXFWOD/kmlkZ1g7FyjgSIEHRpXeeIDiQ3f7FKVd+oeq6VxVlAti+jigqVmtrn8wmBEgbyT8P+5iyVBuoBWSPJetGndR2b83eA6LP5vtB2MFXHClAfKM=")
+        .arg("--abi").arg("tests/samples/Subscription.abi.json");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("constructor: {"))
+        .stdout(predicate::str::contains("\"wallet\": \"-1:adb63a228837e478c7edf5fe3f0b5d12183e1f22246b67712b99ec538d6c5357\""));
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("--json").arg("decode")
+        .arg("body").arg("te6ccgEBAgEAkwABW1ByqHsAAAF1QnI+qZ/1tsdEUQb8jxj9vr/H4WuiQwfD5ESNbO4lcz2Kca2KavABAMAQYZcjaCLLbO1phXFWOD/kmlkZ1g7FyjgSIEHRpXeeIDiQ3f7FKVd+oeq6VxVlAti+jigqVmtrn8wmBEgbyT8P+5iyVBuoBWSPJetGndR2b83eA6LP5vtB2MFXHClAfKM=")
+        .arg("--abi").arg("tests/samples/Subscription.abi.json");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("\"BodyCall\":"))
+        .stdout(predicate::str::contains("\"constructor\":"))
+        .stdout(predicate::str::contains("\"wallet\":"))
+        .stdout(predicate::str::contains("-1:adb63a228837e478c7edf5fe3f0b5d12183e1f22246b67712b99ec538d6c5357"));
+
+
+    //test getting ABI from config
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("config")
+        .arg("--abi")
+        .arg("tests/samples/Subscription.abi.json");
+    cmd.assert()
+        .success();
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("decode")
+        .arg("body").arg("te6ccgEBAgEAkwABW1ByqHsAAAF1QnI+qZ/1tsdEUQb8jxj9vr/H4WuiQwfD5ESNbO4lcz2Kca2KavABAMAQYZcjaCLLbO1phXFWOD/kmlkZ1g7FyjgSIEHRpXeeIDiQ3f7FKVd+oeq6VxVlAti+jigqVmtrn8wmBEgbyT8P+5iyVBuoBWSPJetGndR2b83eA6LP5vtB2MFXHClAfKM=");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("constructor: {"))
+        .stdout(predicate::str::contains("\"wallet\": \"-1:adb63a228837e478c7edf5fe3f0b5d12183e1f22246b67712b99ec538d6c5357\""));
+
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("--json").arg("decode")
+        .arg("body").arg("te6ccgEBAgEAkwABW1ByqHsAAAF1QnI+qZ/1tsdEUQb8jxj9vr/H4WuiQwfD5ESNbO4lcz2Kca2KavABAMAQYZcjaCLLbO1phXFWOD/kmlkZ1g7FyjgSIEHRpXeeIDiQ3f7FKVd+oeq6VxVlAti+jigqVmtrn8wmBEgbyT8P+5iyVBuoBWSPJetGndR2b83eA6LP5vtB2MFXHClAfKM=");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("\"BodyCall\":"))
+        .stdout(predicate::str::contains("\"constructor\":"))
+        .stdout(predicate::str::contains("\"wallet\":"))
+        .stdout(predicate::str::contains("-1:adb63a228837e478c7edf5fe3f0b5d12183e1f22246b67712b99ec538d6c5357"));
+
+
+    //test that abi in commandline is preferred
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("config")
+        .arg("--abi")
+        .arg("tests/samples/wallet.abi.json");
+    cmd.assert()
+        .success();
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("--json").arg("decode")
+        .arg("body").arg("te6ccgEBAgEAkwABW1ByqHsAAAF1QnI+qZ/1tsdEUQb8jxj9vr/H4WuiQwfD5ESNbO4lcz2Kca2KavABAMAQYZcjaCLLbO1phXFWOD/kmlkZ1g7FyjgSIEHRpXeeIDiQ3f7FKVd+oeq6VxVlAti+jigqVmtrn8wmBEgbyT8P+5iyVBuoBWSPJetGndR2b83eA6LP5vtB2MFXHClAfKM=")
+        .arg("--abi").arg("tests/samples/Subscription.abi.json");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("\"BodyCall\":"))
+        .stdout(predicate::str::contains("\"constructor\":"))
+        .stdout(predicate::str::contains("\"wallet\":"))
+        .stdout(predicate::str::contains("-1:adb63a228837e478c7edf5fe3f0b5d12183e1f22246b67712b99ec538d6c5357"));
+
+    //test error on wrong body
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("--json").arg("decode")
+        .arg("body").arg("\"123\"")
+        .arg("--abi").arg("tests/samples/Subscription.abi.json");
+    cmd.assert()
+        .failure()
+        .stdout(predicate::str::contains("body is not a valid base64 string"));
+
+    //test error on empty body
+    let mut cmd = Command::cargo_bin(BIN_NAME)?;
+    cmd.arg("--json").arg("decode")
+        .arg("body").arg("")
+        .arg("--abi").arg("tests/samples/Subscription.abi.json");
+    cmd.assert()
+        .failure()
+        .stdout(predicate::str::contains("failed to decode body"));
 
     Ok(())
 }
